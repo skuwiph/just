@@ -29,6 +29,9 @@
                     case "init":
                         Initialise(args);
                         break;
+                    case "setuser":
+                        SetUser(args);
+                        break;
                     case "new":
                         NewEntry(args);
                         break;
@@ -40,7 +43,7 @@
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"{ex.Message}:{ex.StackTrace}");
+                Console.WriteLine($"{ex.Message}\r\n{ex.StackTrace}");
             }
         }
 
@@ -152,7 +155,22 @@
             }
 
             string url = $"https://aifsdevuk.atlassian.net/browse/{args[1]}";
+            string restUrl = $"https://aifsdevuk.atlassian.net/rest/api/2/issue/{args[1]}";
             string responseData = String.Empty;
+
+            string userPasswordB64 = String.Empty;
+
+            if( args.Length == 4)
+            {
+                if(args[2] == "-u")
+                {
+                    userPasswordB64 = Base64Encode(args[3]);
+                }
+            } else
+            {
+                userPasswordB64 = GetUser();
+            }
+            string authHeader = $"Authorization: Basic {userPasswordB64}";
 
             // TODO(ian): add a parameter to do this from behind a proxy
 
@@ -160,6 +178,10 @@
 
             // NOTE(ian): this is the vanilla approach
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+
+            // Add basic auth
+            request.Headers.Add(authHeader);
+
             HttpWebResponse response = (HttpWebResponse)request.GetResponse();
 
             if (response.StatusCode == HttpStatusCode.OK)
@@ -194,6 +216,48 @@
             CreateDocumentAndWait(args[1], url, responseData);
 
         }
+        
+        private static void SetUser(string[] args)
+        {
+            if (args.Length != 2)
+            {
+                throw new ApplicationException("ERROR: setuser requires the parameter 'username:password'");
+            }
+
+            if(!Directory.Exists(GetLocalSettingsPath(false)))
+            {
+                Directory.CreateDirectory(GetLocalSettingsPath(false));
+            }
+
+            using (StreamWriter sr = new StreamWriter(GetLocalSettingsPath(), false, Encoding.UTF8))
+            {
+                sr.WriteLine(Base64Encode(args[1]));
+                sr.Close();
+            }
+        }
+
+        private static string GetUser()
+        {
+            string user = String.Empty;
+
+            using (StreamReader sr = new StreamReader(GetLocalSettingsPath()))
+            {
+                user = sr.ReadToEnd();
+            }
+
+            return user;
+        }
+
+        private static string GetLocalSettingsPath(bool includeFile = true)
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "aifs", "just", includeFile ? "su.data" : String.Empty);
+        }
+
+        public static string Base64Encode(string plainText)
+        {
+            var plainTextBytes = System.Text.Encoding.UTF8.GetBytes(plainText);
+            return System.Convert.ToBase64String(plainTextBytes);
+        }
 
         private static void CreateDocumentAndWait(string jiraCode, string jiraUrl, string responseData)
         {
@@ -220,6 +284,11 @@
         {
             var parser = new HtmlParser();
             var document = parser.Parse(responseData);
+
+            var login = document.All.Where(m => m.LocalName == "div" && m.Id == "login-panel").FirstOrDefault();
+
+            if (login != null)
+                throw new ApplicationException("Jira is requesting authentication");
 
             var JiraTitle = document.QuerySelector("title");
 
