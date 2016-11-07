@@ -92,6 +92,7 @@
             JustSettings js = new JustSettings();
             string templateDir = string.Empty;
             string pathToFiles = "doc/user-story/";
+            string jiraHostUri = string.Empty;
 
             for(int i=1; i<args.Length; i++)
             {
@@ -103,7 +104,14 @@
                 {
                     pathToFiles = args[i + 1];
                 }
+                else if (args[i].ToLower() == "-j")
+                {
+                    jiraHostUri = args[i + 1];
+                }
             }
+
+            if (String.IsNullOrEmpty(jiraHostUri))
+                throw new ApplicationException("ERROR: You must specify the Jira anchor point with the '-j' option");
 
             if (!String.IsNullOrEmpty(templateDir))
             {
@@ -117,6 +125,7 @@
             }
 
             js.Path = pathToFiles;
+            js.JiraAnchor = jiraHostUri;
 
             JsonSerializer serializer = new JsonSerializer();
             serializer.ContractResolver = new CamelCasePropertyNamesContractResolver();
@@ -154,8 +163,10 @@
                 return;
             }
 
-            string url = $"https://aifsdevuk.atlassian.net/browse/{args[1]}";
-            string restUrl = $"https://aifsdevuk.atlassian.net/rest/api/2/issue/{args[1]}";
+            _settings = ReadSettings();
+
+            string url = $"https://{_settings.JiraAnchor}/browse/{args[1]}";
+            string restUrl = $"https://{_settings.JiraAnchor}/rest/api/2/issue/{args[1]}";
             string responseData = String.Empty;
 
             string userPasswordB64 = String.Empty;
@@ -174,10 +185,10 @@
 
             // TODO(ian): add a parameter to do this from behind a proxy
 
-            Console.WriteLine($"Reading {url}");
+            Console.WriteLine($"Reading {restUrl}");
 
             // NOTE(ian): this is the vanilla approach
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(restUrl);
 
             // Add basic auth
             request.Headers.Add(authHeader);
@@ -213,7 +224,7 @@
                 return;
             }
 
-            CreateDocumentAndWait(args[1], url, responseData);
+            CreateDocumentAndWait(args[1], url, responseData, true);
 
         }
         
@@ -259,12 +270,15 @@
             return System.Convert.ToBase64String(plainTextBytes);
         }
 
-        private static void CreateDocumentAndWait(string jiraCode, string jiraUrl, string responseData)
+        private static void CreateDocumentAndWait(string jiraCode, string jiraUrl, string responseData, bool isJson = false)
         {
             JustDocument jd;
 
             if (!String.IsNullOrEmpty(responseData)) {
-                jd = ParsePage(jiraUrl, responseData);
+                if (isJson)
+                    jd = ParseJson(jiraUrl, responseData);
+                else
+                    jd = ParsePage(jiraUrl, responseData);
             }
             else
             {
@@ -278,6 +292,29 @@
             {
                 Console.WriteLine("User aborted edit.");
             }
+        }
+
+        private static JustDocument ParseJson(string jiraUrl, string responseData)
+        {
+            string touchedTitle = "";
+            string userContent = "";
+            string createdBy = "";
+
+            dynamic json = JsonConvert.DeserializeObject(responseData);
+
+            touchedTitle = $"[{json.key}] - {json.fields.summary.Value}";
+
+            if (json.fields.description != null )
+                userContent = json.fields.description.Value.Replace("\r\n", "\r\n  ");
+
+            createdBy = json.fields.creator.displayName.Value;
+
+            DateTime createdDate = json.fields.created.Value;
+
+            JustDocument jd = CreateDocument(jiraUrl, touchedTitle, userContent, createdBy);
+            jd.CreatedDate = createdDate;
+
+            return jd;
         }
 
         private static JustDocument ParsePage(string jiraUrl, string responseData)
@@ -299,16 +336,18 @@
             return CreateDocument(jiraUrl, touchedTitle, userContent.TextContent.Trim());
         }
 
-        private static JustDocument CreateDocument(string jiraUrl, string title, string description)
+        private static JustDocument CreateDocument(string jiraUrl, string title, string description, string createdBy = "")
         {
-            return new JustDocument(ReadSettings())
+            return new JustDocument(_settings)
             {
                 Title = title.Trim(),
                 Description = description.Trim(),
-                JiraUrl = jiraUrl
+                JiraUrl = jiraUrl,
+                CreatedBy = createdBy
             };
         }
 
+        private static JustSettings _settings;
     }
 
     class JustDocument
@@ -316,9 +355,12 @@
         public JustDocument(JustSettings settings)
         {
             _settings = settings;
+            CreatedBy = "Unknown";
+            CreatedDate = DateTime.Now;
+
             if (String.IsNullOrEmpty(_settings.Template))
             {
-                _template = "# _TITLE\r\n\r\n## Date: _DATE\r\n\r\n## Reference\r\n\r\n_URL\r\n## Description\r\n\r\n_DESCRIPTION\r\n\r\n";
+                _template = "# _TITLE\r\n\r\n## _CREATEDBY on _DATE\r\n\r\n## Reference\r\n\r\n_URL\r\n## Description\r\n\r\n_DESCRIPTION\r\n\r\n";
             }
             else
             {
@@ -326,7 +368,7 @@
             }
         }
 
-        public string FileName => $"{Title.Trim().Replace(" ", "-").Replace("\"","").ToLower()}.md";
+        public string FileName => $"{Title.Trim().Replace(" ", "-").Replace("\"","").Replace("---", "-").ToLower()}.md";
         //public string SafeFileName
         //{
         //    get
@@ -340,6 +382,9 @@
         public string Title { get; set; }    
         public string Description { get; set; }
         public string JiraUrl { get; set; }
+        public string CreatedBy { get; set; }
+        public DateTime CreatedDate { get; set; }
+        public string CreatedDataDisplay => $"{CreatedDate.ToShortDateString()}";
 
         // Remainder goes here
 
@@ -379,7 +424,8 @@
         {
             StringBuilder s = new StringBuilder(_template);
             s.Replace("_TITLE", Title);
-            s.Replace("_DATE", DateTime.Now.ToString("dd/MM/yyyy"));
+            s.Replace("_CREATEDBY", CreatedBy);
+            s.Replace("_DATE", CreatedDataDisplay);
             s.Replace("_DESCRIPTION", Description);
             s.Replace("_URL", JiraUrl);
             using (StreamWriter sr = new StreamWriter(Path.Combine(path, FileName.ToLower()), false, Encoding.UTF8))
@@ -408,5 +454,7 @@
     {
         public string Path { get; set; }
         public string Template { get; set; }
+        public string JiraAnchor { get; set; }
     }
+    
 }
